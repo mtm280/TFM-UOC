@@ -1,0 +1,145 @@
+---
+title: "Quality Control mRNA arrays"
+author: "Margalida Torrens Mas"
+output:
+  html_document:
+    output_dir: "../results_mrna" 
+    toc: 3
+    code_folding: hide
+date: '`r format(Sys.Date(),"%e de %B, %Y")`'
+params:
+  raw_data_dir: "C:/Users/Lidat/Desktop/Màster Bioinformàtica i Bioestadística UOC/TFM/mdata"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache = TRUE, warning=FALSE, message=FALSE)
+source("C:/Users/Lidat/Desktop/Màster Bioinformàtica i Bioestadística UOC/TFM UOC/scripts/functions.R")
+```
+
+```{r libraries, echo = FALSE}
+library(oligo)
+library(Biobase)
+library(arrayQualityMetrics)
+library(ggplot2)
+library(affycoretools)
+library(dplyr)
+library(XML)
+library(janitor)
+library(pheatmap)
+```
+
+# Introducción
+
+Este trabajo tiene como objetivo explorar los cambios tempranos en los perfiles de expresión génica asociados con el desarrollo del cáncer colorrectal (CCR), que puedan ayudar en un futuro a identificar marcadores que optimicen los programas actuales de cribado. 
+Concretamente, se pretende analizar la expresión génica diferencial entre distintos estadios de la enfermedad, representados por muestras control sin enfermedad, muestras de adenomas de alto grado con probabilidad de avanzar a neoplasia, y muestras de CCR. El RNA usado para este análisis proviene de vesículas extracelulares extraídas del aspirado intestinal obtenido durante colonoscopias. 
+
+
+# Control de calidad
+
+En este apartado se analiza la calidad de los datos de partida, tanto antes como después del proceso de normalización. En este apartado se describe el control de calidad aplicado a los datos de mRNA. 
+
+## Lectura de datos
+
+Se analizan los datos de los microarrays de mRNA de 3 muestras correspondientes a cáncer colorrectal, 3 correspondientes a adenomas de alto grado, y 3 controles. 
+
+```{r data, message=FALSE}
+cel_files <- list.celfiles(params$raw_data_dir, full.names = T)
+samples <- read.AnnotatedDataFrame(file.path(params$raw_data_dir, "msamples.csv"), header=TRUE, row.names=1, sep=";")
+
+raw_data <- read.celfiles(cel_files, pkgname="pd.clariom.s.human", phenoData = samples)
+
+rownames(pData(raw_data)) <- samples@data$ShortName
+colnames(raw_data) <- rownames(pData(raw_data))
+
+head(raw_data) #check
+```
+
+## Visualización de la calidad
+
+A continuación, se analiza de manera visual la distribución de los valores de expresión para detectar posibles fuentes de error, previamente a la normalización de los datos. 
+
+Se visualiza primero la densidad de los valores de intensidad de señal de los datos crudos mediante histograma y se compara la distribución entre los microarrays con un boxplot. Después, se realiza un análisis de calidad de cada microarray con `arrayQualityMetrics`. Se muestra directamente la tabla resumen con los outliers identificados. 
+Las columnas llamadas 1, 2, 3, indican los distintos métodos para la detección de outliers. El método 1 corresponde a distancia entre arrays; el método 2, a boxplots; y el método 3 a los MA plots. Se marcan los outliers con 'x'. 
+
+```{r quality control}
+hist(raw_data,lwd=2,xlab='log intensity', which='pm', main="Density before normalization")
+boxplot(raw_data, cex.axis=0.5, las=2, which="all", col=c(rep("red", 6), rep("green", 3)), main="Distribution of raw intensity values")
+
+arrayQualityMetrics(raw_data, outdir = "../results_mrna/raw_data", force = TRUE)
+res <- "../results_mrna/raw_data/index.html"
+tables <- readHTMLTable(res)
+table_QC<-tables[[1]]
+knitr::kable(table_QC)
+
+```
+
+Se puede observar cierta variabilidad entre los distintos microarrays. El control de calidad revela dos muestras con una calidad preocupante: la muestra 'Lesion5' y la muestra 'Healthy3' son detectadas como *outliers* a través de dos métodos distintos (distancia entre arrays y MA plots, y boxplot y MA plots, respectivamente). Además, la muestra 'Lesion2' también es detectada como posible *outlier* mediante los MA plots. Antes de descartar las muestras, se procede a la normalización de las muestras para evaluar si se corrigen estas observaciones.
+
+# Normalización de los datos
+
+A continuación, se normalizan los datos mediante el método RMA para corregir la variabilidad técnica entre las distintas muestras. En este método, primero se corrige el background o ruido de fondo ajustando las intensidades de las sondas, seguido de la normalización por cuantiles y la *summarization* por mediana para cada gen.
+
+```{r normalization}
+norm_data <- oligo::rma(raw_data) #RMA
+```
+
+# Control de calidad posterior a la normalización
+ 
+Se repite el análisis de calidad para observar si hay algún cambio en la identificación de outliers y se realiza un Relative Log Expression (RLE) plot para comprobar que la normalización se ha realizado satisfactoriamente. 
+
+```{r quality control after norm}
+hist(norm_data)
+boxplot(norm_data, cex.axis=0.5, las=2,  which="all", col = c(rep("red", 6), rep("green", 3), main="Distribution of norm intensity values"))
+expr_data <- exprs(norm_data)
+RLE_plot(expr_data,"RLE plot for normalized data")
+
+arrayQualityMetrics(norm_data, outdir= "../results_mrna/norm_data", force = TRUE)
+res <- "../results_mrna/norm_data/index.html"
+tables <- readHTMLTable(res)
+table_QC<-tables[[1]]
+knitr::kable(table_QC)
+
+```
+ 
+Después de la normalización, se puede observar que todas las muestras se encuentran dentro de los mismos rangos de expresión, indicando que el proceso de normalización se ha realizado correctamente. No obstante, la muestra `Healthy3` sigue siendo detectada como un *outlier*, aunque solo mediante boxplot. Se ha decidido conservar la muestra por dos motivos:
+(i) Los otros métodos de detección de *outliers* (distancia entre arrays y MA plots) no identifican la muestra `Healthy` como problemática, lo que sugiere que la calidad es aceptable.
+(ii) Solo se dispone de 3 controles en el grupo *Healthy*, por lo que descartar esta muestra reduciría significativamente el tamaño muestral de este grupo, lo que afectaría a la potencia estadística y la robustez del análisis posterior. 
+Por lo tanto, se decide proceder con el análisis sin descartar la muestra, siempre con la consideración de esto como una limitación del estudio y con precaución a la hora de realizar el análisis final. 
+ 
+# Análisis exploratorio 
+
+Finalmente, se visualiza la agrupación de las muestras mediante un análisis de componentes principales (PCA) y un análisis de clustering según las distancias entre las muestras normalizadas. 
+
+```{r PCA, cluster}
+groups <- pData(norm_data)$Group
+names <- pData(norm_data)$ShortName
+PCA_plot(expr_data, groups, names)
+
+annotation_for_heatmap <- 
+  data.frame(Phenotype = groups)
+
+row.names(annotation_for_heatmap) <- row.names(pData(norm_data))
+
+dists <- as.matrix(dist(t(expr_data), method = "manhattan"))
+
+rownames(dists) <- row.names(pData(norm_data))
+hmcol <- rev(colorRampPalette(RColorBrewer::brewer.pal(9, "YlOrRd"))(255))
+colnames(dists) <- NULL
+diag(dists) <- NA
+
+set.seed(123)
+pheatmap(dists, col = (hmcol), 
+         annotation_row = annotation_for_heatmap,
+         legend = TRUE, 
+         treeheight_row = 0,
+         legend_breaks = c(min(dists, na.rm = TRUE), 
+                         max(dists, na.rm = TRUE)), 
+         legend_labels = (c("small distance", "large distance")),
+         main = "Clustering heatmap for the normalized samples")
+```
+
+Se observa que la agrupación de las muestras es correcta. 
+
+```{r save norm_data, echo=FALSE, message=FALSE}
+saveRDS(norm_data, file = "norm_data_mrna.rds")
+```

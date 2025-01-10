@@ -1,0 +1,157 @@
+---
+title: "Interaction network mRNA-miRNA"
+author: "Margalida Torrens Mas"
+output:
+  html_document:
+    toc: 3
+    code_folding: hide
+date: '`r format(Sys.Date(),"%e de %B, %Y")`'
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache = TRUE, warning=FALSE, message=FALSE)
+```
+
+```{r libraries, echo = FALSE}
+library(oligo)
+library(Biobase)
+library(ggplot2)
+library(affycoretools)
+library(dplyr)
+library(XML)
+library(janitor)
+library(limma)
+library(pd.clariom.s.human)
+library(AnnotationDbi)
+library(EnhancedVolcano)
+library(DT)
+library(igraph)
+library(multiMiR)
+```
+
+# Introducción
+
+Este trabajo tiene como objetivo explorar los cambios tempranos en los perfiles de expresión génica asociados con el desarrollo del cáncer colorrectal (CCR), que puedan ayudar en un futuro a identificar marcadores que optimicen los programas actuales de cribado. 
+Para ello, se analizan los datos de los microarrays de miRNA de 3 muestras correspondientes a cáncer colorrectal, 3 correspondientes a adenomas de alto grado, y 3 controles. 
+En este apartado se realiza la integración de los genes y miRNA diferencialmente expresados obtenidos en el análisis de expresión diferencial. 
+
+# Red de interacción
+
+A continuación, se construye una red formada por miRNA y mRNA sobreexpresados e infraexpresados, respectivamente, y viceversa. 
+
+```{r, message=FALSE}
+DEmiRNA <- readRDS("C:/Users/Lidat/Desktop/Màster Bioinformàtica i Bioestadística UOC/TFM UOC/scripts/sig_miRNA.rds")
+up_miRNA <- DEmiRNA[DEmiRNA$logFC>0,]
+down_miRNA <- DEmiRNA[DEmiRNA$logFC<0,]
+
+up_sig_mirnas <- rownames(up_miRNA)
+down_sig_mirnas <- rownames(down_miRNA)
+
+DEmRNA <- readRDS("C:/Users/Lidat/Desktop/Màster Bioinformàtica i Bioestadística UOC/TFM UOC/scripts/sig_mRNA.rds")
+up_mRNA <- DEmRNA[DEmRNA$logFC>0,]
+down_mRNA <- DEmRNA[DEmRNA$logFC<0,]
+
+up_sig_mrnas <- up_mRNA$SYMBOL
+down_sig_mrnas <- down_mRNA$SYMBOL
+
+#Overexpressed miRNA & downregulated genes
+
+interactions_1 <- get_multimir(
+  mirna = up_sig_mirnas,
+  target = down_sig_mrnas,
+  summary = FALSE,
+  table = "all")
+
+#Downregulated miRNA & overexpressed genes
+
+interactions_2 <- get_multimir(
+  mirna = down_sig_mirnas,
+  target = up_sig_mrnas,
+  summary = FALSE,
+  table = "validated")
+
+#extract data
+interaction1_data <- interactions_1@data
+interaction1_clean <- interaction1_data[!interaction1_data$database %in% c("mir2disease", "phenomir"), ]
+#mir2disease & phenomir return NA values
+
+#plot network
+g1 <- graph_from_data_frame(interaction1_clean[, c("mature_mirna_id", "target_symbol")])
+V(g1)$color <- ifelse(grepl("miR", V(g1)$name), "skyblue", "orange")
+plot(g1, 
+     vertex.size = 15,
+     vertex.label.cex = 0.8, 
+     vertex.label.dist = 1,
+     edge.arrow.size = 0.3, 
+     edge.curved = 0.2,
+     main = "miRNA up - mRNA down network")
+
+
+#tkplot(g1, layout = layout_with_fr, vertex.size = 15, vertex.color = V(g1)$color, vertex.label.cex = 0.8) #interactive network
+
+#extract data
+interaction2_data <- interactions_2@data
+
+#plot network
+g2 <- graph_from_data_frame(interaction2_data[, c("mature_mirna_id", "target_symbol")])
+V(g2)$color <- ifelse(grepl("miR", V(g2)$name), "skyblue", "orange")
+plot(g2, 
+     vertex.size = 15,
+     vertex.label.cex = 0.8, 
+     vertex.label.dist = 1,
+     edge.arrow.size = 0.3, 
+     edge.curved = 0.2,
+     main = "miRNA down - mRNA up network")
+
+
+#tkplot(g2, layout = layout_with_fr, vertex.size = 15, vertex.color = V(g2)$color, vertex.label.cex = 0.8) #interactive network
+
+```
+
+A continuación, se identifican los nodos con más conexiones en la red miRNAs sobreexpresados-mRNA infraexpresados. 
+
+```{r max nodes}
+
+all_nodes <- unique(c(interaction1_clean$mature_mirna_id, interaction1_clean$target_symbol))
+
+node_type <- ifelse(all_nodes %in% interaction1_clean$mature_mirna_id, "miRNA", "mRNA")
+names(node_type) <- all_nodes
+
+node_degree <- degree(g1, mode = "all")
+miRNA_degree <- node_degree[names(node_degree) %in% interaction1_clean$mature_mirna_id]
+mRNA_degree <- node_degree[names(node_degree) %in% interaction1_clean$target_symbol]
+
+top_miRNA <- names(sort(miRNA_degree, decreasing = TRUE)[1])
+top_miRNA_connections <- sort(miRNA_degree, decreasing = TRUE)[1]
+
+top_mRNA <- names(sort(mRNA_degree, decreasing = TRUE)[1])
+top_mRNA_connections <- sort(mRNA_degree, decreasing = TRUE)[1]
+
+cat("El miRNA con más conexiones es:", top_miRNA, "con", top_miRNA_connections, "conexiones.\n")
+cat("El mRNA con más conexiones es:", top_mRNA, "con", top_mRNA_connections, "conexiones.\n")
+
+```
+
+A continuación, se identifican los nodos con más conexiones en la red miRNAs infraexpresados-mRNA sobreexpresados. 
+
+```{r max nodes 2}
+
+all_nodes <- unique(c(interaction2_data$mature_mirna_id, interaction2_data$target_symbol))
+
+node_type <- ifelse(all_nodes %in% interaction2_data$mature_mirna_id, "miRNA", "mRNA")
+names(node_type) <- all_nodes
+
+node_degree <- degree(g2, mode = "all")
+miRNA_degree <- node_degree[names(node_degree) %in% interaction2_data$mature_mirna_id]
+mRNA_degree <- node_degree[names(node_degree) %in% interaction2_data$target_symbol]
+
+top_miRNA <- names(sort(miRNA_degree, decreasing = TRUE)[1])
+top_miRNA_connections <- sort(miRNA_degree, decreasing = TRUE)[1]
+
+top_mRNA <- names(sort(mRNA_degree, decreasing = TRUE)[1])
+top_mRNA_connections <- sort(mRNA_degree, decreasing = TRUE)[1]
+
+cat("El miRNA con más conexiones es:", top_miRNA, "con", top_miRNA_connections, "conexiones.\n")
+cat("El mRNA con más conexiones es:", top_mRNA, "con", top_mRNA_connections, "conexiones.\n")
+
+```

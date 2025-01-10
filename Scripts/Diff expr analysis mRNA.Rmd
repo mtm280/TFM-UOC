@@ -1,0 +1,373 @@
+---
+title: "Differential expression analysis mRNA arrays"
+author: "Margalida Torrens Mas"
+output:
+  html_document:
+    output_dir: "../results_mrna" 
+    toc: 3
+    code_folding: hide
+date: '`r format(Sys.Date(),"%e de %B, %Y")`'
+bibliography: references.bib
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache = TRUE, warning=FALSE, message=FALSE)
+```
+
+```{r libraries, echo = FALSE}
+library(oligo)
+library(Biobase)
+library(ggplot2)
+library(affycoretools)
+library(dplyr)
+library(XML)
+library(janitor)
+library(limma)
+library(pd.clariom.s.human)
+library(AnnotationDbi)
+library(EnhancedVolcano)
+library(DT)
+library(clusterProfiler)
+library(enrichplot)
+library(org.Hs.eg.db)
+library(enrichR)
+library(ReactomePA)
+library(forcats)
+library(gplots)
+
+```
+
+# Introducción
+
+Este trabajo tiene como objetivo explorar los cambios tempranos en los perfiles de expresión génica asociados con el desarrollo del cáncer colorrectal (CCR), que puedan ayudar en un futuro a identificar marcadores que optimicen los programas actuales de cribado. 
+Para ello, se analizan los datos de los microarrays de mRNA de 3 muestras correspondientes a cáncer colorrectal, 3 correspondientes a adenomas de alto grado, y 3 controles. 
+En este apartado se realiza el análisis de expresión diferencial, comparando los grupos control y lesión (cáncer colorrectal y adenomas de alto grado).
+
+# Filtrado de los genes
+
+En este apartado se valora realizar un filtrado de genes según su nivel de expresión detectado en las distintas muestras. 
+Se eliminan primero aquellos genes sin anotación (sin Gene Symbol) y posteriormente, se realiza un filtrado de genes basado en su mediana de expresión. Para ello, se utiliza un umbral que elimina los genes cuya mediana de expresión sea inferior al 5% más bajo de todas las medianas de expresión. Este valor de umbral se determina mediante un histograma con las medianas de expresión, identificando un punto de corte adecuado para maximizar la calidad de los datos sin perder información relevante. 
+Cabe destacar que, al tratarse de RNA procedente de vesículas extracelulares, es posible que al aplicar este filtro se pierdan genes relevantes, ya que estas partículas contienen una cantidad más limitada de mRNA comparado con otro tipo de muestras. Por ello, el filtrado aplicado es un filtrado conservador. 
+
+```{r filtered data, message=FALSE}
+norm_data <- readRDS("norm_data_mrna.rds")
+#dim(norm_data)
+ann_data <- annotateEset(norm_data, pd.clariom.s.human)
+
+ann_data<-ann_data[!is.na(ann_data@featureData@data$SYMBOL),] #remove genes without annotation
+#dim(ann_data)
+
+medians <- rowMedians(Biobase::exprs(ann_data)) #calculate median expression of each gene
+names(medians) <- rownames(Biobase::exprs(ann_data)) #keep gene names
+threshold <- quantile(medians, 0.05)
+hist_res <- hist(medians, 50, col = "cornsilk1", freq = FALSE, 
+            main = "Histogram of the median intensities", 
+            border = "antiquewhite4",
+            xlab = "Median intensities")
+abline(v = threshold, col = "coral4", lwd = 2)
+
+sorted_genes <- sort(medians) #sort all genes by median
+num_genes_to_filter <- floor(0.05 * length(medians))
+low_expression_genes <- names(sorted_genes)[1:num_genes_to_filter] #5% least expressed genes
+filtered_data <- ann_data[!rownames(ann_data) %in% low_expression_genes, ]
+#dim(filtered_data)
+
+```
+
+Se observa que de las `r dim(norm_data)[1]` señales detectadas (*features*), después del filtrado quedan `r dim(ann_data)[1]`. 
+
+# Análisis de expresión diferencial
+
+A continuación, se inicia el análisis de expresión diferencial comparando los grupos *Healthy* y *Lesion* utilizando el paquete `limma`. Primero se definen las matrices de diseño y de contrastes y seguidamente se ajusta un modelo lineal a los datos de expresión con `lmFit` con ajuste Bayesiano con `eBayes`. Finalmente, se obtienen aquellos genes diferencialmente expresados (DEGs) con un Fold Change de 2 (`lfc>1`), un p-valor < 0.05 y ajustando por FDR para comparaciones múltiples. 
+
+```{r DE analysis}
+
+group <- factor(pData(filtered_data)$Group)
+design <- model.matrix(~0 + group)
+colnames(design) <- levels(group)
+rownames(design) <- pData(filtered_data)$ShortName
+print(design)
+
+contrast.matrix <- makeContrasts(LvsH = Lesion - Healthy, levels = design)
+
+fit <- lmFit(filtered_data, design)
+fit.main <- contrasts.fit(fit, contrast.matrix)
+fit.main <- eBayes(fit.main)
+
+tab_all = topTable(fit.main, coef="LvsH", number=Inf, adjust.method="fdr")
+
+
+topTab<- topTable(fit.main, number = nrow(fit.main), coef = "LvsH",  lfc = 1, p.value = 0.05)
+dim(topTab)
+head(topTab)
+
+datatable(topTab,caption = "DEG Lesion vs Healthy")
+```
+
+Se detectan `r dim(topTab)[1]` DEGs entre los grupos `Lesion` y `Healthy`. No se observan genes downregulados con las condiciones de fold change impuestas. Por ello, se analizarán también los DEGs con un fold change de 1.5 y 1.2. 
+
+```{r DE analysis2}
+
+topTab_1.5<- topTable(fit.main, number = nrow(fit.main), coef = "LvsH",  lfc = 0.585, p.value = 0.05)
+dim(topTab_1.5)
+head(topTab_1.5)
+
+datatable(topTab_1.5,caption = "DEG Lesion vs Healthy FC 1.5")
+
+topTab_1.2<- topTable(fit.main, number = nrow(fit.main), coef = "LvsH",  lfc = 0.26, p.value = 0.05)
+dim(topTab_1.2)
+head(topTab_1.2)
+
+datatable(topTab_1.2,caption = "DEG Lesion vs Healthy FC 1.2")
+```
+Como se puede observar, los resultados con un Fold change de 1.5 y de 1.2 son iguales, por lo que a partir de ahora solo se trabajará los resultados del Fold change de 2 y de 1.5.
+
+Finalmente, se visualizan los resultados mediante un volcano plot y un heatmap.
+
+```{r volcano, heatmap}
+#Volcano plot
+EnhancedVolcano(
+  tab_all,
+  lab = tab_all$SYMBOL,             
+  x = 'logFC',                           
+  y = 'P.Value',                       
+  xlab = 'Log2 Fold Change',
+  ylab = '-Log10 P-Value',
+  pCutoff = 0.05,                         
+  FCcutoff = 1,                           
+  pointSize = 2.0,                       
+  labSize = 3.0,                          
+  col = c('grey30', 'forestgreen', 'royalblue', 'red2'), 
+  colAlpha = 0.6,                         
+  legendPosition = 'right',               
+  legendLabSize = 10,
+  legendIconSize = 3.0,
+  title = "Volcano plot FC 2")
+
+EnhancedVolcano(
+  tab_all,
+  lab = tab_all$SYMBOL,             
+  x = 'logFC',                           
+  y = 'P.Value',                       
+  xlab = 'Log2 Fold Change',
+  ylab = '-Log10 P-Value',
+  pCutoff = 0.05,                         
+  FCcutoff = 0.585,                           
+  pointSize = 2.0,                       
+  labSize = 3.0,                          
+  col = c('grey30', 'forestgreen', 'royalblue', 'red2'), 
+  colAlpha = 0.6,                         
+  legendPosition = 'right',               
+  legendLabSize = 10,
+  legendIconSize = 3.0,
+  title = "Volcano plot FC 1.5")
+
+#Heatmap
+selectedRows <- rownames(filtered_data) %in% rownames(topTab)
+selectedData <- filtered_data[selectedRows, ]
+selectedData <- as.matrix(selectedData)
+my_palette <- colorRampPalette(c("green", "red"))(n = 299)
+heatmap.2(selectedData, Rowv = TRUE, Colv = TRUE, main = "HeatMap Lesion vs Healthy FC 2",
+    scale = "row", col = my_palette, sepcolor = "white", sepwidth = c(0.05, 0.05),
+    cexRow = 0.5, cexCol = 0.9, key = TRUE, keysize = 1.5, density.info = "histogram",
+    ColSideColors = c(rep("red", 6), rep("green", 3)), tracecol = NULL, srtCol = 30)
+
+selectedRows <- rownames(filtered_data) %in% rownames(topTab_1.5)
+selectedData <- filtered_data[selectedRows, ]
+selectedData <- as.matrix(selectedData)
+my_palette <- colorRampPalette(c("green", "red"))(n = 299)
+heatmap.2(selectedData, Rowv = TRUE, Colv = TRUE, main = "HeatMap Lesion vs Healthy FC 1.5",
+    scale = "row", col = my_palette, sepcolor = "white", sepwidth = c(0.05, 0.05),
+    cexRow = 0.5, cexCol = 0.9, key = TRUE, keysize = 1.5, density.info = "histogram",
+    ColSideColors = c(rep("red", 6), rep("green", 3)), tracecol = NULL, srtCol = 30)
+  
+```
+
+
+# Análisis de enriquecimiento (ORA)
+
+Tras identificar los DEGs, se realiza un análisis de enriquecimiento funcional para explorar las vías y procesos más característicos asociados con estos genes, buscando una interpretación biológica de los resultados. 
+
+Para este análisis, se utiliza el paquete `clusterProfiler` (@Yu2012) que permite realizar estudios de enriquecimiento funcional interrogando bases de datos como GO (Gene Ontology), para la clasificación de los genes según procesos biológicos (BP), componentes celulares (CC) y funciones moleculares (MF), y Reactome o KEGG para identificar rutas metabólicas y de señalización enriquecidas (@clusterProfilerGuide). Se usarán los DEG con un Fold change de 1.5. Los resultados se visualizan mediante distintos gráficos, mostrando los términos o vías enriquecidas, su significancia y la relación entre ellas. 
+
+
+```{r}
+gene_symbols <- unique(topTab_1.5$SYMBOL)
+go_enrich_BP <- enrichGO(gene = gene_symbols, 
+                      OrgDb = org.Hs.eg.db, 
+                      keyType = "SYMBOL", 
+                      ont = "BP",  # Biological Process
+                      pAdjustMethod = "fdr", 
+                      pvalueCutoff = 0.05, 
+                      qvalueCutoff = 0.05)
+
+clusterProfiler::dotplot(go_enrich_BP, showCategory = 20) + ggtitle("Enrichment GO Terms - Biological Processes") + theme(axis.text.y = element_text(size = 8))
+
+goplot(go_enrich_BP, showCategory=5) + ggtitle("Enrichment network for Biological Processes")
+
+s_BP <- clusterProfiler::simplify(go_enrich_BP)
+
+cnetplot(s_BP) + ggtitle("Simplified CNET plot for Biological Processes")
+
+go_enrich_CC <- enrichGO(gene = gene_symbols, 
+                      OrgDb = org.Hs.eg.db, 
+                      keyType = "SYMBOL", 
+                      ont = "CC",  # Cellular Component
+                      pAdjustMethod = "fdr", 
+                      pvalueCutoff = 0.05, 
+                      qvalueCutoff = 0.05)
+
+clusterProfiler::dotplot(go_enrich_CC, showCategory = 20) + ggtitle("Enrichment GO Terms - Cellular Components") + theme(axis.text.y = element_text(size = 8))
+
+
+go_enrich_MF <- enrichGO(gene = gene_symbols, 
+                      OrgDb = org.Hs.eg.db, 
+                      keyType = "SYMBOL", 
+                      ont = "MF",  # Molecular Function
+                      pAdjustMethod = "fdr", 
+                      pvalueCutoff = 0.05, 
+                      qvalueCutoff = 0.05)
+
+clusterProfiler::dotplot(go_enrich_MF, showCategory = 20) + ggtitle("Enrichment GO Terms - Molecular Function") + theme(axis.text.y = element_text(size = 7))
+
+s_MF <- clusterProfiler::simplify(go_enrich_MF)
+
+cnetplot(s_MF) + ggtitle("Simplified CNET plot for Molecular Function")
+
+#get ENTREZ IDs
+gene_ids <- bitr(gene_symbols, fromType="SYMBOL", 
+                              toType="ENTREZID", 
+                              OrgDb="org.Hs.eg.db")  
+
+entrez_ids <- gene_ids$ENTREZID
+
+reactome_enrich <- enrichPathway(gene = entrez_ids, 
+                                 organism = "human", 
+                                 pAdjustMethod = "fdr", 
+                                 pvalueCutoff = 0.05, 
+                                 qvalueCutoff = 0.05)
+
+clusterProfiler::dotplot(reactome_enrich, showCategory = 10) + ggtitle("Enrichment Reactome Pathways") + theme(axis.text.y = element_text(size = 8))
+
+cnetplot(reactome_enrich) + ggtitle("CNET plot for Reactome")
+
+KEGG_genes <- enrichKEGG(gene = entrez_ids, organism = "hsa", pvalueCutoff = 0.05)
+
+clusterProfiler::dotplot(KEGG_genes, showCategory = 20) + ggtitle("Enrichment KEGG Pathways") + theme(axis.text.y = element_text(size = 8))
+
+cnetplot(KEGG_genes) + ggtitle("CNET plot for KEGG")
+
+
+```
+
+# Análisis de enriquecimiento (GSEA)
+
+Finalmente, se realiza un Gene Set Enrichment Analysis o GSEA (@Subramanian2005) con las mismas bases de datos usadas anteriormente y se utiliza igualmente el paquete `clusterProfiler` (@Yu2012). Este análisis permite evaluar si existen diferencias significativas en conjuntos de genes previamente definidos. El GSEA toma como input una lista ordenada de todos los genes identificados. En este caso, los genes se han ordenado por Fold change y por el score calculado como el producto del Fold change y el logaritmo en base 10 del p-valor, para ordenar los genes según su magnitud de cambio y significancia. Los resultados se visualizan mediante distintos gráficos, mostrando los términos o vías enriquecidas y los Normalized Enrichment Scores. Sin embargo, solo se han encontrado términos enriquecidos ordenando únicamente por Fold change, por lo que aquí se presenta solo este último caso. Además, solo se han identificado vías enriquecidas con los términos GO, pero no se han detectado vías significativamente enriquecidas en las bases de datos Reactome ni KEGG.
+
+```{r}
+
+gene_list <- tab_all$logFC
+names(gene_list) <- tab_all$SYMBOL
+gene_list <- gene_list[!duplicated(names(gene_list))]
+GSEA_data <- sort(gene_list, decreasing = TRUE)
+
+set.seed(123)
+
+gsea_goBP <- gseGO(geneList = GSEA_data,
+              OrgDb = org.Hs.eg.db,
+              ont = "BP",
+              keyType = "SYMBOL",
+              seed=TRUE)
+
+clusterProfiler::dotplot(gsea_goBP, showCategory=10, split=".sign") + facet_grid(.~.sign) + theme(axis.text.y = element_text(size = 8))
+
+gsea_goBP_filter <- filter(gsea_goBP,NES > 1.95 | NES < -2)
+
+ggplot(gsea_goBP_filter, showCategory=10, aes(NES, fct_reorder(Description, NES),
+fill=qvalue)) +
+  geom_col() +
+  geom_vline(xintercept=0, linetype="dashed", color="blue",size=1)+
+  scale_fill_gradientn(colours=c("#b3eebe","#46bac2", "#371ea3"),
+                       guide=guide_colorbar(reverse=TRUE))+
+  scale_x_continuous(expand=c(0,0))+
+  theme_bw() + 
+  #theme(text=element_text(size=8))+
+  xlab("Normalized Enrichment Score") +
+  ylab(NULL) +
+  ggtitle("GSEA with GO BP")
+
+
+gsea_goCC <- gseGO(geneList = GSEA_data,
+              OrgDb = org.Hs.eg.db,
+              ont = "CC",
+              keyType = "SYMBOL",
+              seed=TRUE)
+
+clusterProfiler::dotplot(gsea_goCC, showCategory=10, split=".sign") + facet_grid(.~.sign) + theme(axis.text.y = element_text(size = 7))
+
+gsea_goCC_filter <- filter(gsea_goCC,NES > 1.95 | NES < -2)
+
+ggplot(gsea_goCC_filter, showCategory=10, aes(NES, fct_reorder(Description, NES),
+fill=qvalue)) +
+  geom_col() +
+  geom_vline(xintercept=0, linetype="dashed", color="blue",size=1)+
+  scale_fill_gradientn(colours=c("#b3eebe","#46bac2", "#371ea3"),
+                       guide=guide_colorbar(reverse=TRUE))+
+  scale_x_continuous(expand=c(0,0))+
+  theme_bw() + 
+  #theme(text=element_text(size=8))+
+  xlab("Normalized Enrichment Score") +
+  ylab(NULL) +
+  ggtitle("GSEA with GO CC")
+
+
+gsea_goMF <- gseGO(geneList = GSEA_data,
+              OrgDb = org.Hs.eg.db,
+              ont = "MF",
+              keyType = "SYMBOL",
+              seed=TRUE)
+
+clusterProfiler::dotplot(gsea_goMF, showCategory=10, split=".sign") + facet_grid(.~.sign) + theme(axis.text.y = element_text(size = 7))
+
+gsea_goMF_filter <- filter(gsea_goMF,NES > 1.95 | NES < -2)
+
+ggplot(gsea_goMF_filter, showCategory=10, aes(NES, fct_reorder(Description, NES),
+fill=qvalue)) +
+  geom_col() +
+  geom_vline(xintercept=0, linetype="dashed", color="blue",size=1)+
+  scale_fill_gradientn(colours=c("#b3eebe","#46bac2", "#371ea3"),
+                       guide=guide_colorbar(reverse=TRUE))+
+  scale_x_continuous(expand=c(0,0))+
+  theme_bw() + 
+  #theme(text=element_text(size=8))+
+  xlab("Normalized Enrichment Score") +
+  ylab(NULL) +
+  ggtitle("GSEA with GO MF")
+
+mapped_entrez <- gene_ids$ENTREZID[match(names(GSEA_data), gene_ids$SYMBOL)]
+GSEA_data_entrez <- setNames(GSEA_data, mapped_entrez)
+GSEA_data_entrez <- GSEA_data_entrez[!is.na(names(GSEA_data_entrez))]
+GSEA_data_entrez <- sort(GSEA_data_entrez, decreasing = TRUE)
+
+
+#gsea_R <- gsePathway(geneList = GSEA_data_entrez,
+ #             organism="human",
+ #            seed=TRUE)
+
+# no term enriched under specific pvalueCutoff...
+
+
+#gsea_KEGG <- gseKEGG(geneList = GSEA_data_entrez,
+  #                  organism = "human",
+   #                  keyType = "kegg",
+    #                 seed = TRUE)
+
+# no term enriched under specific pvalueCutoff...
+
+```
+
+```{r save topTab, echo=FALSE, message=FALSE}
+saveRDS(topTab_1.5, file = "sig_mRNA.rds")
+```
+
+# Referencias

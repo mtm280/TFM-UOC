@@ -1,0 +1,478 @@
+---
+title: "Differential expression analysis miRNA arrays"
+author: "Margalida Torrens Mas"
+output:
+  html_document:
+    output_dir: "../results_mirna" 
+    toc: 3
+    code_folding: hide
+date: '`r format(Sys.Date(),"%e de %B, %Y")`'
+bibliography: references.bib
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache = TRUE, warning=FALSE, message=FALSE)
+```
+
+```{r libraries, echo = FALSE}
+library(oligo)
+library(Biobase)
+library(ggplot2)
+library(affycoretools)
+library(dplyr)
+library(XML)
+library(janitor)
+library(limma)
+library(pd.clariom.s.human)
+library(AnnotationDbi)
+library(EnhancedVolcano)
+library(DT)
+library(miRNAtap)
+library(miRNAtap.db)
+library(gplots)
+library(annotate)
+library(clusterProfiler)
+library(enrichplot)
+library(org.Hs.eg.db)
+library(ReactomePA)
+library(forcats)
+library(multiMiR)
+library(VennDiagram)
+library(ggvenn)
+```
+
+# Introducción
+
+Este trabajo tiene como objetivo explorar los cambios tempranos en los perfiles de expresión génica asociados con el desarrollo del cáncer colorrectal (CCR), que puedan ayudar en un futuro a identificar marcadores que optimicen los programas actuales de cribado. 
+Para ello, se analizan los datos de los microarrays de miRNA de 3 muestras correspondientes a cáncer colorrectal, 3 correspondientes a adenomas de alto grado, y 3 controles. 
+En este apartado se realiza el análisis de expresión diferencial, comparando los grupos control y lesión (cáncer colorrectal y adenomas de alto grado).
+
+# Filtrado de miRNAs
+
+```{r load data, message=FALSE, echo=FALSE}
+norm_quant <- readRDS("norm_quant_mirna.rds")
+norm_loess <- readRDS("norm_loess_mirna.rds")
+```
+
+Para los datos normalizados por cuantiles y por cyclic loess, ya se han filtrado previamente las sondas asociadas a la especie humana, eliminando aquellas pertenecientes a otras especies. En este apartado, se lleva a cabo un filtrado adicional para incluir solo los miRNA maduros, descartando otras especies de RNA como precursores de miRNA o snoRNA también detectados en el array. Este filtrado se realiza por dos motivos: (i) uno de los objetivos del TFM es analizar la expresión diferencial de los miRNA, y los miRNA maduros son las formas funcionales que regulan activamente la expresión génica mediante su interacción con los mRNA diana, y (ii) el otro objetivo es contruir una red de interacción miRNA-mRNA basándose en el análisis de expresión diferencial, para lo cual puede resultar adecuado centrar el análisis en las especies de RNA biológicamente relevantes.
+
+```{r}
+
+feat_data <- read.csv("C:/Users/Lidat/Desktop/Màster Bioinformàtica i Bioestadística UOC/TFM UOC/midata/miRNA4.0_annotations.csv", comment.char="#")
+rownames(feat_data)<-feat_data$Probe.Set.ID
+
+#filter quantile-normalized data
+
+featureData(norm_quant)@data<-feat_data[match(rownames(featureData(norm_quant)@data),feat_data$Probe.Set.Name),]
+
+expr_data_quant <- exprs(norm_quant)
+
+filtered_data_quant<-expr_data_quant[norm_quant@featureData@data$Sequence.Type=="miRNA",]
+
+#filter cyclic loess-normalized data
+
+featureData(norm_loess)@data<-feat_data[match(rownames(featureData(norm_loess)@data),feat_data$Probe.Set.Name),]
+
+expr_data_loess <- exprs(norm_loess)
+
+filtered_data_loess<-expr_data_loess[norm_loess@featureData@data$Sequence.Type=="miRNA",]
+
+```
+
+# Análisis de expresión diferencial
+
+## Datos normalizados por cuantiles
+
+Se procede al análisis de expresión diferencial, primero con los datos normalizados por cuantiles. Se usa únicamente el Fold change de 1.5 puesto que un Fold change de 2 solo arroja un total de 9 miRNAs diferencialmente expresados (DEmiRNA), de los cuales solo uno está sobreexpresado en las muestras `Lesion`.
+
+```{r DE analysis}
+group <- factor(pData(norm_quant)$Group)
+design <- model.matrix(~0 + group)
+colnames(design) <- levels(group)
+rownames(design) <- pData(norm_quant)$ShortName
+print(design)
+
+contrast.matrix <- makeContrasts(LvsH = Lesion - Healthy, levels = design)
+
+fit_quant <- lmFit(filtered_data_quant, design)
+fit.main_quant <- contrasts.fit(fit_quant, contrast.matrix)
+fit.main_quant <- eBayes(fit.main_quant)
+
+tab_all_quant = topTable(fit.main_quant,coef="LvsH",number=Inf,adjust.method="fdr")
+ID_mirnas <- rownames(tab_all_quant)
+mirnas <- feat_data$Transcript.ID.Array.Design[feat_data$Probe.Set.Name %in% ID_mirnas]
+rownames(tab_all_quant) <- mirnas
+
+quant_mi1.5 <- topTable(fit.main_quant, number = nrow(fit.main_quant), coef = "LvsH",  lfc = 0.585)
+quant_mi1.5 <- quant_mi1.5[quant_mi1.5$P.Value < 0.05, ]
+#quant_mi2 <- topTable(fit.main_quant, number = nrow(fit.main_quant), coef = "LvsH",  lfc = 1)
+#quant_mi2 <- quant_mi2[quant_mi2$P.Value < 0.05, ]
+
+ID_mirnas1.5 <- rownames(quant_mi1.5)
+mirnas1.5 <- feat_data$Transcript.ID.Array.Design[feat_data$Probe.Set.Name %in% ID_mirnas1.5]
+rownames(quant_mi1.5) <- mirnas1.5
+
+dim(quant_mi1.5)
+
+datatable(quant_mi1.5,caption = "DEmiRNAs Lesion vs Healthy Fold-change > 1.5")
+
+```
+
+Se visualizan los DEmiRNA obtenidos por volcano plot y heatmap. 
+
+```{r volcano, heatmap}
+EnhancedVolcano(
+  tab_all_quant,
+  lab = rownames(tab_all_quant),             
+  x = 'logFC',                           
+  y = 'P.Value',                       
+  xlab = 'Log2 Fold Change',
+  ylab = '-Log10 P-Value',
+  pCutoff = 0.05,                         
+  FCcutoff = 0.585,                           
+  pointSize = 2.0,                       
+  labSize = 3.0,                          
+  col = c('grey30', 'forestgreen', 'royalblue', 'red2'), 
+  colAlpha = 0.6,                         
+  legendPosition = 'right',               
+  legendLabSize = 10,
+  legendIconSize = 3.0,
+  title = "Volcano plot FC 1.5")
+
+#Heatmap
+
+rownames(filtered_data_quant) <- feat_data$Transcript.ID.Array.Design.[match(rownames(filtered_data_quant), feat_data$Probe.Set.Name)]
+selectedRows <- rownames(filtered_data_quant) %in% rownames(quant_mi1.5)
+selectedData <- filtered_data_quant[selectedRows, ]
+selectedData <- as.matrix(selectedData)
+
+my_palette <- colorRampPalette(c("green", "red"))(n = 299)
+heatmap.2(selectedData, Rowv = TRUE, Colv = TRUE, main = "HeatMap Lesion vs Healthy",
+    scale = "row", col = my_palette, sepcolor = "white", sepwidth = c(0.05, 0.05),
+    cexRow = 0.5, cexCol = 0.9, key = TRUE, keysize = 1.5, density.info = "histogram",
+    ColSideColors = c(rep("red", 6), rep("green", 3)), tracecol = NULL, srtCol = 30)
+  
+```
+
+
+## Datos normalizados por cyclic loess
+
+Se procede al análisis de expresión diferencial, ahora con los datos normalizados por cyclic loess. Igualmente, se usa únicamente el Fold change de 1.5 puesto que un Fold change de 2 solo arroja un total de 8 miRNAs diferencialmente expresados (DEmiRNA), de los cuales solo uno está sobreexpresado en las muestras `Lesion`.
+
+```{r DE analysis loess}
+
+fit_loess <- lmFit(filtered_data_loess, design)
+fit.main_loess <- contrasts.fit(fit_loess, contrast.matrix)
+fit.main_loess <- eBayes(fit.main_loess)
+
+tab_all_loess = topTable(fit.main_loess,coef="LvsH",number=Inf,adjust.method="fdr")
+ID_mirnas <- rownames(tab_all_loess)
+mirnas <- feat_data$Transcript.ID.Array.Design[feat_data$Probe.Set.Name %in% ID_mirnas]
+rownames(tab_all_loess) <- mirnas
+
+loess_mi1.5 <- topTable(fit.main_loess, number = nrow(fit.main_loess), coef = "LvsH",  lfc = 0.585)
+loess_mi1.5 <- loess_mi1.5[loess_mi1.5$P.Value < 0.05, ]
+#loess_mi2 <- topTable(fit.main_loess, number = nrow(fit.main_loess), coef = "LvsH",  lfc = 1)
+#loess_mi2 <- loess_mi2[loess_mi2$P.Value < 0.05, ]
+
+ID_mirnas1.5 <- rownames(loess_mi1.5)
+mirnas1.5 <- feat_data$Transcript.ID.Array.Design[feat_data$Probe.Set.Name %in% ID_mirnas1.5]
+rownames(loess_mi1.5) <- mirnas1.5
+
+dim(loess_mi1.5)
+
+datatable(loess_mi1.5,caption = "DEmiRNAs Lesion vs Healthy Fold-change > 1.5")
+
+```
+
+Se visualizan los DEmiRNA obtenidos por volcano plot y heatmap. 
+
+```{r volcano, heatmap loess}
+EnhancedVolcano(
+  tab_all_quant,
+  lab = rownames(tab_all_loess),             
+  x = 'logFC',                           
+  y = 'P.Value',                       
+  xlab = 'Log2 Fold Change',
+  ylab = '-Log10 P-Value',
+  pCutoff = 0.05,                         
+  FCcutoff = 0.585,                           
+  pointSize = 2.0,                       
+  labSize = 3.0,                          
+  col = c('grey30', 'forestgreen', 'royalblue', 'red2'), 
+  colAlpha = 0.6,                         
+  legendPosition = 'right',               
+  legendLabSize = 10,
+  legendIconSize = 3.0,
+  title = "Volcano plot FC 1.5")
+
+
+
+selectedRows <- rownames(filtered_data_loess) %in% rownames(loess_mi1.5)
+selectedData <- filtered_data_loess[selectedRows, ]
+selectedData <- as.matrix(selectedData)
+
+# HEATMAP PLOT
+rownames(filtered_data_loess) <- feat_data$Transcript.ID.Array.Design.[match(rownames(filtered_data_loess), feat_data$Probe.Set.Name)]
+selectedRows <- rownames(filtered_data_loess) %in% rownames(loess_mi1.5)
+selectedData <- filtered_data_quant[selectedRows, ]
+selectedData <- as.matrix(selectedData)
+
+my_palette <- colorRampPalette(c("green", "red"))(n = 299)
+heatmap.2(selectedData, Rowv = TRUE, Colv = TRUE, main = "HeatMap Lesion vs Healthy",
+   scale = "row", col = my_palette, sepcolor = "white", sepwidth = c(0.05, 0.05),
+    cexRow = 0.5, cexCol = 0.9, key = TRUE, keysize = 1.5, density.info = "histogram",
+    ColSideColors = c(rep("red", 3), rep("green", 6)), tracecol = NULL, srtCol = 30)
+  
+```
+
+Finalmente, se puede ver que los DEmiRNA identificados con los dos métodos de normalización testeados muestran consistencia: los 23 DEmiRNA identificados con los datos normalizados mediante cyclic loess son detectados también en los datos normalizados por cuantiles. 
+
+```{r comp quant & loess}
+
+DEquant <- rownames(quant_mi1.5)
+DEloess <- rownames(loess_mi1.5)
+
+sets <- list("Quantiles" = DEquant, "Cyclic Loess" = DEloess)
+
+ggvenn(
+  sets,
+  fill_color = c("#FF9999", "#9999FF"),
+  stroke_size = 0.5,
+  set_name_size = 5,
+  text_size = 4)
+```
+
+# Predicción de dianas para análisis de significación biológica
+
+Para realizar el análisis de significación biológica, es común primero realizar una predicción de las dianas con los miRNA. Esta predicción se realizará probando dos paquetes ampliamente utilizados en la literatura científica: miRNAtap y multiMiR. 
+
+## Predicción con miRNAtap
+
+El paquete miRNAtap usa cinco algoritmos de predicción distintos: DIANA, Miranda, PicTar, TargetScan y miRDB, asignando un score final a cada diana y priorizando aquellas con mayor probabilidad de ser funcionales.
+
+Para realizar el ORA posterior, solo se tendrán en cuenta las 100 primeras dianas ordenadas según su score. 
+
+```{r target prediction}
+allmirnas <- rownames(quant_mi1.5)
+
+alltargets <- rbind()
+for (i in 1:length(allmirnas)) {
+  mir <- allmirnas[i]
+  targets <- getPredictedTargets(mir, species = 'hsa',method = 'geom', min_src = 2)
+  if(!is.null(targets)){
+    targets <- as.data.frame(targets)
+    # Convert the rownames into a column
+    targets$EntrezIDs <- rownames(targets)
+    # Remove rownames
+    rownames(targets) <- NULL
+    # Add another column for miRNA
+    targets$miRNA <- mir
+    alltargets <- bind_rows(alltargets, targets)
+  }else{
+    print(paste0("No targets were found for: ", mir))
+  }
+}
+
+alltargets <- alltargets[, c(ncol(alltargets), (ncol(alltargets)-1), 1:(ncol(alltargets)-2))]
+
+alltargets$GeneSymbols <- getSYMBOL(alltargets$EntrezIDs, data='org.Hs.eg')
+alltargets <- alltargets[, c(1:2, ncol(alltargets), 3:(ncol(alltargets)-1))]
+
+alltargets_clean <- alltargets[!is.na(alltargets$GeneSymbols), ]
+
+ranked_genes <- alltargets_clean[,"rank_product"]
+names(ranked_genes) <- alltargets_clean$GeneSymbols
+head(ranked_genes)
+
+top_targets <- alltargets_clean %>%
+  group_by(miRNA) %>%
+  slice_min(order_by = rank_final, n = 100)
+
+unique_targets <- unique(top_targets$GeneSymbols)
+
+up_mi1.5 <- quant_mi1.5[quant_mi1.5$logFC>0,]
+up_mi_targets <- rownames(up_mi1.5)
+
+down_targets <- rbind()
+for (i in 1:length(up_mi_targets)) {
+  mir <- up_mi_targets[i]
+  targets <- getPredictedTargets(mir, species = 'hsa',method = 'geom', min_src = 2)
+  if(!is.null(targets)){
+    targets <- as.data.frame(targets)
+    # Convert the rownames into a column
+    targets$EntrezIDs <- rownames(targets)
+    # Remove rownames
+    rownames(targets) <- NULL
+    # Add another column for miRNA
+    targets$miRNA <- mir
+    down_targets <- bind_rows(down_targets, targets)
+  }else{
+    print(paste0("No targets were found for: ", mir))
+  }
+  
+}
+
+down_targets <- down_targets[, c(ncol(down_targets), (ncol(down_targets)-1), 1:(ncol(down_targets)-2))]
+
+down_targets$GeneSymbols <- getSYMBOL(down_targets$EntrezIDs, data='org.Hs.eg')
+down_targets <- down_targets[, c(1:2, ncol(down_targets), 3:(ncol(down_targets)-1))]
+
+down_targets_clean <- down_targets[!is.na(down_targets$GeneSymbols), ]
+top_down_targets <- down_targets_clean %>%
+  group_by(miRNA) %>%
+  slice_min(order_by = rank_final, n = 100)
+
+down_unique <- unique(top_down_targets$GeneSymbols)
+```
+
+Se realiza un ORA analizando los GO Terms y las vías de Reactome y KEGG con las dianas predichas para todos los miRNA. 
+
+```{r enrichment mirnatap}
+go_enrich_BP <- enrichGO(gene = unique_targets, 
+                      OrgDb = org.Hs.eg.db, 
+                      keyType = "SYMBOL", 
+                      ont = "BP",  # Biological Process
+                      pAdjustMethod = "fdr", 
+                      pvalueCutoff = 0.05, 
+                      qvalueCutoff = 0.05)
+
+s_BP <- clusterProfiler::simplify(go_enrich_BP)
+clusterProfiler::dotplot(s_BP, showCategory = 20) + ggtitle("Enrichment GO Terms - Biological Processes") + theme(axis.text.y = element_text(size = 8))
+
+go_enrich_CC <- enrichGO(gene = unique_targets, 
+                      OrgDb = org.Hs.eg.db, 
+                      keyType = "SYMBOL", 
+                      ont = "CC",  # Cellular Component
+                      pAdjustMethod = "fdr", 
+                      pvalueCutoff = 0.05, 
+                      qvalueCutoff = 0.05)
+
+s_CC <- clusterProfiler::simplify(go_enrich_CC)
+clusterProfiler::dotplot(s_CC, showCategory = 20) + ggtitle("Enrichment GO Terms - Cellular Component") + theme(axis.text.y = element_text(size = 8))
+
+go_enrich_MF <- enrichGO(gene = unique_targets, 
+                      OrgDb = org.Hs.eg.db, 
+                      keyType = "SYMBOL", 
+                      ont = "MF",  # Molecular Function
+                      pAdjustMethod = "fdr", 
+                      pvalueCutoff = 0.05, 
+                      qvalueCutoff = 0.05)
+
+s_MF <- clusterProfiler::simplify(go_enrich_MF)
+clusterProfiler::dotplot(s_MF, showCategory = 20) + ggtitle("Enrichment GO Terms - Molecular Function") + theme(axis.text.y = element_text(size = 8))
+
+#Get ENTREZ ID
+gene_ids <- bitr(unique_targets, fromType="SYMBOL", 
+                              toType="ENTREZID", 
+                              OrgDb="org.Hs.eg.db")  
+
+entrez_ids <- gene_ids$ENTREZID
+
+reactome_enrich <- enrichPathway(gene = entrez_ids, 
+                                organism = "human", 
+                                pAdjustMethod = "fdr", 
+                                pvalueCutoff = 0.05, 
+                                qvalueCutoff = 0.05)
+
+clusterProfiler::dotplot(reactome_enrich, showCategory = 10) + ggtitle("Enrichment Reactome Pathways") + theme(axis.text.y = element_text(size = 8))
+
+KEGG_genes <- enrichKEGG(gene = entrez_ids, organism = "hsa", pvalueCutoff = 0.05)
+
+clusterProfiler::dotplot(KEGG_genes, showCategory = 20) + ggtitle("Enrichment KEGG Pathways") + theme(axis.text.y = element_text(size = 8))
+
+```
+
+No se han encontrado vías usando la base de datos Reactome ni KEGG con un FDR < 0,05.
+
+Se analizan también las dianas de los DEmiRNA sobreexpresados para inferir qué vías podrían verse inhibidas. Este análisis se realiza únicamente analizando los GO terms relacionados con procesos biológicos. 
+
+```{r downtargets}
+go_enrich_BP <- enrichGO(gene = down_unique, 
+                      OrgDb = org.Hs.eg.db, 
+                      keyType = "SYMBOL", 
+                      ont = "BP",  # Biological Process
+                      pAdjustMethod = "fdr", 
+                      pvalueCutoff = 0.05, 
+                      qvalueCutoff = 0.05)
+s_BP <- clusterProfiler::simplify(go_enrich_BP)
+clusterProfiler::dotplot(s_BP, showCategory = 20) + ggtitle("Enrichment GO Terms - Biological Processes") + theme(axis.text.y = element_text(size = 8))
+
+```
+
+## Predicción con multiMiR
+
+A continuación, se realiza la predicción de dianas con el paquete multiMiR. En este caso, se analizan todas las dianas validadas experimentalmente, obtenidas de las bases de datos miRecords, miRTarBase y TarBase, lo que proporciona unas dianas más confiables.
+
+```{r target prediction multiMiR}
+
+results <- get_multimir(
+    mirna = allmirnas,              
+    table = "validated",                  
+    summary = FALSE)
+```
+
+Se realiza el ORA con todas las dianas validadas. 
+
+```{r enrichmentmultmir}
+
+target_genes <- unique(results@data$target_symbol)
+
+go_enrich_BP <- enrichGO(gene = target_genes, 
+                      OrgDb = org.Hs.eg.db, 
+                      keyType = "SYMBOL", 
+                      ont = "BP",  # Biological Process
+                      pAdjustMethod = "fdr", 
+                      pvalueCutoff = 0.05, 
+                      qvalueCutoff = 0.05)
+
+s_BP <- clusterProfiler::simplify(go_enrich_BP)
+clusterProfiler::dotplot(s_BP, showCategory = 20) + ggtitle("Enrichment GO Terms - Biological Processes") + theme(axis.text.y = element_text(size = 8))
+
+go_enrich_CC <- enrichGO(gene = target_genes, 
+                      OrgDb = org.Hs.eg.db, 
+                      keyType = "SYMBOL", 
+                      ont = "CC",  # Cellular Component
+                      pAdjustMethod = "fdr", 
+                      pvalueCutoff = 0.05, 
+                      qvalueCutoff = 0.05)
+
+s_CC <- clusterProfiler::simplify(go_enrich_CC)
+clusterProfiler::dotplot(s_CC, showCategory = 20) + ggtitle("Enrichment GO Terms - Cellular Component") + theme(axis.text.y = element_text(size = 8))
+
+go_enrich_MF <- enrichGO(gene = target_genes, 
+                      OrgDb = org.Hs.eg.db, 
+                      keyType = "SYMBOL", 
+                      ont = "MF",  # Molecular Function
+                      pAdjustMethod = "fdr", 
+                      pvalueCutoff = 0.05, 
+                      qvalueCutoff = 0.05)
+
+s_MF <- clusterProfiler::simplify(go_enrich_MF)
+clusterProfiler::dotplot(s_MF, showCategory = 20) + ggtitle("Enrichment GO Terms - Molecular Function") + theme(axis.text.y = element_text(size = 8))
+
+#Get ENTREZ ID
+gene_ids <- bitr(target_genes, fromType="SYMBOL", 
+                              toType="ENTREZID", 
+                              OrgDb="org.Hs.eg.db")  
+
+entrez_ids <- gene_ids$ENTREZID
+
+reactome_enrich <- enrichPathway(gene = entrez_ids, 
+                                organism = "human", 
+                                pAdjustMethod = "fdr", 
+                                pvalueCutoff = 0.05, 
+                                qvalueCutoff = 0.05)
+
+clusterProfiler::dotplot(reactome_enrich, showCategory = 10) + ggtitle("Enrichment Reactome Pathways") + theme(axis.text.y = element_text(size = 8))
+
+KEGG_genes <- enrichKEGG(gene = entrez_ids, organism = "hsa", pvalueCutoff = 0.05)
+
+clusterProfiler::dotplot(KEGG_genes, showCategory = 20) + ggtitle("Enrichment KEGG Pathways") + theme(axis.text.y = element_text(size = 8))
+
+```
+
+
+```{r save topTabs, echo=FALSE, message=FALSE}
+saveRDS(quant_mi1.5, file = "sig_miRNA.rds")
+```
