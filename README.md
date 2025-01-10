@@ -1,7 +1,7 @@
 # TFM-UOC
 ## Integración de resultados de mRNA-miRNA para el análisis del cáncer colorrectal
 
-Este repositorio contiene el código utilizado en el Trabajo de Fin de Máster (TFM) titulado "Análisis de microarrays de mRNA y miRNA para la identificación de biomarcadores en cáncer colorrectal (CCR)" del Máster Universitario de Bioinformática y Bioestadística de la UOC y la UB. Este proyecto ha sido desarollado en R y requiere las siguientes librerías: oligo, arrayQualityMetrics, limma, clusterProfiler, ReactomePA, miRNAtap, multiMiR, igraph, ggplot2, 
+Este repositorio contiene el código utilizado en el Trabajo de Fin de Máster (TFM) titulado "Análisis de microarrays de mRNA y miRNA para la identificación de biomarcadores en cáncer colorrectal (CCR)" del Máster Universitario de Bioinformática y Bioestadística de la UOC y la UB. Este proyecto ha sido desarollado en R y requiere las siguientes librerías: oligo, arrayQualityMetrics, limma, clusterProfiler, ReactomePA, miRNAtap, multiMiR, igraph, ggplot2, affycoretools, pd.clariom.s.human, AnnotationDbi, EnhancedVolcano, VennDiagram. 
 
 ## Descripción del Proyecto
 
